@@ -214,19 +214,41 @@ maybe_utc({Date, {H, M, S, Ms}}) ->
             {Date1, {H1, M1, S1, Ms}}
     end.
 
+rotate_logfile(File,Count) ->
+  rotate_logfile(File,count,Count,undefined).
+rotate_logfile(File,undefined,Count,_DateSpec) ->
+  rotate_logfile_count(File,Count);
+rotate_logfile(File,count,Count,_DateSpec) ->
+  rotate_logfile_count(File,Count);
+rotate_logfile(File,date,_Count,DateSpec) ->
+  rotate_logfile_date(File,DateSpec).
+  
 %% renames failing are OK
-rotate_logfile(File, 0) ->
+rotate_logfile_count(File, 0) ->
     file:delete(File);
-rotate_logfile(File, 1) ->
+rotate_logfile_count(File, 1) ->
     case file:rename(File, File++".0") of
         ok ->
             ok;
         _ ->
-            rotate_logfile(File, 0)
+            rotate_logfile_count(File, 0)
     end;
-rotate_logfile(File, Count) ->
+rotate_logfile_count(File, Count) ->
     _ = file:rename(File ++ "." ++ integer_to_list(Count - 2), File ++ "." ++ integer_to_list(Count - 1)),
-    rotate_logfile(File, Count - 1).
+    rotate_logfile_count(File, Count - 1).
+
+rotate_logfile_date(File,DateSpec) ->
+  Timestamp = cal:now_to_local_time(os:timestamp()),
+  DateTimeStr = filename_postfix(DateSpec,Timestamp),
+  NewFilename = iolist_to_binary([filename:rootname(File),DateTimeStr,filename:extension(File)]),
+  _ = file:rename(File,NewFilename),
+  ok.
+
+filename_postfix([{Type,_}|_],{{YYYY,MM,DD},{HH,NN,SS}}) when (Type =:= minute_interval) or (Type =:= hour_interval) ->
+  io_lib:format("_~4..0b_~2..0b_~2..0b_~2..0b_~2..0b_~2..0b",[YYYY,MM,DD,HH,NN,SS]);
+filename_postfix(_,{{YYYY,MM,DD},_}) ->
+  io_lib:format("_~4..0b_~2..0b_~2..0b",[YYYY,MM,DD]).
+
 
 format_time() ->
     format_time(maybe_utc(localtime_ms())).
@@ -243,6 +265,26 @@ format_time({utc, {{Y, M, D}, {H, Mi, S}}}) ->
 format_time({{Y, M, D}, {H, Mi, S}}) ->
     {[integer_to_list(Y), $-, i2l(M), $-, i2l(D)],
      [i2l(H), $:, i2l(Mi), $:, i2l(S)]}.
+
+parse_rotation_minute_spec([D1, D2], Res) ->
+    case list_to_integer([D1, D2]) of
+        X when X >= 1, X =< 59 ->
+            {ok, Res ++ [{minute_interval, X}]};
+        _ ->
+            {error, invalid_date_spec}
+    end;
+parse_rotation_minute_spec(_, _) ->
+    {error, invalid_date_spec}.
+
+parse_rotation_hour_spec([D1, D2], Res) ->
+    case list_to_integer([D1, D2]) of
+        X when X >= 1, X =< 23 ->
+            {ok, Res ++ [{hour_interval, X}]};
+        _ ->
+            {error, invalid_date_spec}
+    end;
+parse_rotation_hour_spec(_, _) ->
+    {error, invalid_date_spec}.
 
 parse_rotation_day_spec([], Res) ->
     {ok, Res ++ [{hour, 0}]};
@@ -282,6 +324,10 @@ parse_rotation_date_spec([$$, $M, M1, M2]) ->
     end;
 parse_rotation_date_spec([$$, $M, M]) ->
     {ok, [{date, M - 48}, {hour, 0}]};
+parse_rotation_date_spec([$$, $H, $I|X]) when X /= [] ->
+    parse_rotation_hour_spec(X, []);
+parse_rotation_date_spec([$$, $N, $I|X]) when X /= [] ->
+    parse_rotation_minute_spec(X, []);
 parse_rotation_date_spec([$$|X]) when X /= [] ->
     parse_rotation_day_spec(X, []);
 parse_rotation_date_spec(_) ->
@@ -289,12 +335,19 @@ parse_rotation_date_spec(_) ->
 
 calculate_next_rotation(Spec) ->
     Now = calendar:local_time(),
+    calculate_next_rotation2(Spec,Now).
+
+calculate_next_rotation2(Spec,Now) ->
     Later = calculate_next_rotation(Spec, Now),
     calendar:datetime_to_gregorian_seconds(Later) -
       calendar:datetime_to_gregorian_seconds(Now).
 
 calculate_next_rotation([], Now) ->
     Now;
+calculate_next_rotation([{minute_interval, X}], Now) ->
+    calendar:gregorian_seconds_to_datetime(((((calendar:datetime_to_gregorian_seconds(Now) div 60) div X) * X)+X)*60);
+calculate_next_rotation([{hour_interval, X}], Now) ->
+    calendar:gregorian_seconds_to_datetime(((((calendar:datetime_to_gregorian_seconds(Now) div 3600) div X) * X)+X)*3600);
 calculate_next_rotation([{hour, X}|T], {{_, _, _}, {Hour, _, _}} = Now) when Hour < X ->
     %% rotation is today, sometime
     NewNow = setelement(2, Now, {X, 0, 0}),

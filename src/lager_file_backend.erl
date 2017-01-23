@@ -38,9 +38,9 @@
 
 -behaviour(gen_event).
 
+-include_lib("kernel/include/file.hrl").
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
--include_lib("kernel/include/file.hrl").
 -compile([{parse_transform, lager_transform}]).
 -endif.
 
@@ -66,6 +66,7 @@
         flap=false :: boolean(),
         size = 0 :: integer(),
         date :: undefined | string(),
+	rotate_mode :: atom(),
         count = 10 :: integer(),
         shaper :: lager_shaper(),
         formatter :: atom(),
@@ -108,14 +109,17 @@ init(LogFileConfig) when is_list(LogFileConfig) ->
             {error, {fatal, bad_config}};
         Config ->
             %% probabably a better way to do this, but whatever
-            [RelName, Level, Date, Size, Count, HighWaterMark, SyncInterval, SyncSize, SyncOn, CheckInterval, Formatter, FormatterConfig] =
-              [proplists:get_value(Key, Config) || Key <- [file, level, date, size, count, high_water_mark, sync_interval, sync_size, sync_on, check_interval, formatter, formatter_config]],
-            Name = lager_util:expand_path(RelName),
+            [RelName, Level, Date, Size, RotateMode, Count, HighWaterMark, SyncInterval, SyncSize, SyncOn, CheckInterval, Formatter, FormatterConfig] =
+              [proplists:get_value(Key, Config) || Key <- [file, level, date, size, rotate_mode, count, high_water_mark, sync_interval, sync_size, sync_on, check_interval, formatter, formatter_config]],
+            Name = lager_util:expand_path(RelName),	
+	
+	    ensure_rotation(Name,RotateMode,Count,Date),
             schedule_rotation(Name, Date),
+	
             Shaper = #lager_shaper{hwm=HighWaterMark},
-            State0 = #state{name=Name, level=Level, size=Size, date=Date, count=Count, shaper=Shaper, formatter=Formatter,
+            State0 = #state{name=Name, level=Level, size=Size, date=Date, rotate_mode = RotateMode, count=Count, shaper=Shaper, formatter=Formatter,
                 formatter_config=FormatterConfig, sync_on=SyncOn, sync_interval=SyncInterval, sync_size=SyncSize,
-                check_interval=CheckInterval},
+                check_interval=CheckInterval},	
             State = case lager_util:open_logfile(Name, {SyncSize, SyncInterval}) of
                 {ok, {FD, Inode, _}} ->
                     State0#state{fd=FD, inode=Inode};
@@ -183,9 +187,10 @@ handle_event(_Event, State) ->
     {ok, State}.
 
 %% @private
-handle_info({rotate, File}, #state{name=File,count=Count,date=Date} = State) ->
-    _ = lager_util:rotate_logfile(File, Count),
+handle_info({rotate, File}, #state{name=File,date=Date,rotate_mode=RotateMode,count=Count} = State) ->
+    _ = lager_util:rotate_logfile(File,RotateMode,Count,Date),
     State1 = close_file(State),
+    _ = lager_util:ensure_logfile(File, State#state.fd, State#state.inode, {State#state.sync_size, State#state.sync_interval}),
     schedule_rotation(File, Date),
     {ok, State1};
 handle_info(_Info, State) ->
@@ -219,15 +224,14 @@ config_to_id(Config) ->
     end.
 
 
-write(#state{name=Name, fd=FD, inode=Inode, flap=Flap, size=RotSize,
-        count=Count} = State, Timestamp, Level, Msg) ->
+write(#state{name=Name, fd=FD, inode=Inode, flap=Flap, size=RotSize } = State, Timestamp, Level, Msg) ->
     LastCheck = timer:now_diff(Timestamp, State#state.last_check) div 1000,
     case LastCheck >= State#state.check_interval orelse FD == undefined of
         true ->
             %% need to check for rotation
             case lager_util:ensure_logfile(Name, FD, Inode, {State#state.sync_size, State#state.sync_interval}) of
                 {ok, {_, _, Size}} when RotSize /= 0, Size > RotSize ->
-                    case lager_util:rotate_logfile(Name, Count) of
+                    case lager_util:rotate_logfile(Name, State#state.rotate_mode, State#state.count, State#state.date) of
                         ok ->
                             %% go around the loop again, we'll do another rotation check and hit the next clause of ensure_logfile
                             write(State, Timestamp, Level, Msg);
@@ -331,6 +335,17 @@ validate_logfile_proplist([{size, Size}|Tail], Acc) ->
         _ ->
             throw({bad_config, "Invalid rotation size", Size})
     end;
+validate_logfile_proplist([{rotate_mode, Mode}|Tail], Acc) ->
+    case Mode of
+        undefined ->
+	  validate_logfile_proplist(Tail, [{rotate_mode, count}|Acc]);
+        count -> 
+	  validate_logfile_proplist(Tail, [{rotate_mode, count}|Acc]);
+        date -> 
+	  validate_logfile_proplist(Tail, [{rotate_mode, date}|Acc]);
+        _ -> 
+	  throw({bad_config, "Invalid rotation mode", Mode})
+    end;
 validate_logfile_proplist([{count, Count}|Tail], Acc) ->
     case Count of
         C when is_integer(C), C >= 0 ->
@@ -415,6 +430,22 @@ close_file(#state{fd=FD} = State) ->
     _ = file:datasync(FD),
     _ = file:close(FD),
     State#state{fd=undefined}.
+
+ensure_rotation(File,RotateMode,Count,Date) ->
+  case file:read_file_info(File) of
+    {ok,FInfo} -> 
+      case lager_util:calculate_next_rotation(Date,FInfo#file_info.mtime) < calendar:local_time() of
+	true ->	
+	  _ = lager_util:rotate_logfile(File,RotateMode,Count,Date),
+	  ok;
+	false ->
+	  ok
+      end;
+    {error,enoent} ->
+      ok;
+    {error,Reason} ->
+      ?INT_LOG(error, "Failed to rotate log at startup file ~s with error ~s", [File, file:format_error(Reason)])
+  end.
 
 -ifdef(TEST).
 
@@ -1092,3 +1123,4 @@ config_validation_test_() ->
 
 
 -endif.
+
