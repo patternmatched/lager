@@ -238,7 +238,8 @@ rotate_logfile_date(File,DateSpec) ->
 
 filename_postfix([{Type,_}|_],{{YYYY,MM,DD},{HH,NN,SS}}) when (Type =:= minute_interval) or (Type =:= hour_interval) ->
   io_lib:format("_~4..0b_~2..0b_~2..0b_~2..0b_~2..0b_~2..0b",[YYYY,MM,DD,HH,NN,SS]);
-filename_postfix(_,{{YYYY,MM,DD},_}) ->
+filename_postfix(_,{Date,_}) ->
+  {YYYY,MM,DD} = calendar:gregorian_days_to_date(calendar:date_to_gregorian_days(Date)-1),
   io_lib:format("_~4..0b_~2..0b_~2..0b",[YYYY,MM,DD]).
 
 
