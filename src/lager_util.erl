@@ -23,13 +23,13 @@
 -include_lib("kernel/include/file.hrl").
 
 -export([
-	 levels/0, level_to_num/1, level_to_chr/1,
-	 num_to_level/1, config_to_mask/1, config_to_levels/1, mask_to_levels/1,
-	 open_logfile/2, ensure_logfile/4, rotate_logfile/2, format_time/0, format_time/1,
-	 localtime_ms/0, localtime_ms/1, maybe_utc/1, parse_rotation_date_spec/1,
-	 calculate_next_rotation/1, validate_trace/1, check_traces/4, is_loggable/3,
-	 trace_filter/1, trace_filter/2, expand_path/1, find_file/2, check_hwm/1,
-	 make_internal_sink_name/1, otp_version/0
+    levels/0, level_to_num/1, level_to_chr/1,
+    num_to_level/1, config_to_mask/1, config_to_levels/1, mask_to_levels/1,
+    open_logfile/2, ensure_logfile/4, rotate_logfile/2, format_time/0, format_time/1,
+    localtime_ms/0, localtime_ms/1, maybe_utc/1, parse_rotation_date_spec/1,
+    calculate_next_rotation/1, validate_trace/1, check_traces/4, is_loggable/3,
+    trace_filter/1, trace_filter/2, expand_path/1, find_file/2, check_hwm/1,
+    make_internal_sink_name/1, otp_version/0
 ]).
 
 -ifdef(TEST).
