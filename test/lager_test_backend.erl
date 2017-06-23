@@ -1,6 +1,6 @@
 %% -------------------------------------------------------------------
 %%
-%% Copyright (c) 2011-2015 Basho Technologies, Inc.
+%% Copyright (c) 2011-2017 Basho Technologies, Inc.
 %%
 %% This file is provided to you under the Apache License,
 %% Version 2.0 (the "License"); you may not use this file
@@ -20,23 +20,38 @@
 
 -module(lager_test_backend).
 
--include("lager.hrl").
-
 -behaviour(gen_event).
 
 -export([init/1, handle_call/2, handle_event/2, handle_info/2, terminate/2,
         code_change/3]).
 
+-include("lager.hrl").
+
 -define(TEST_SINK_NAME, '__lager_test_sink').              %% <-- used by parse transform
 -define(TEST_SINK_EVENT, '__lager_test_sink_lager_event'). %% <-- used by lager API calls and internals for gen_event
 
--record(state, {level :: list(), buffer :: list(), ignored :: term()}).
+-record(state, {
+    level   :: list(),
+    buffer  :: list(),
+    ignored :: term()
+}).
 -compile({parse_transform, lager_transform}).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
--record(test, {attrs :: list(), format :: list(), args :: list()}).
--export([pop/0, count/0, count_ignored/0, flush/0, print_state/0]).
+-record(test, {
+    attrs   :: list(),
+    format  :: list(),
+    args    :: list()
+}).
+-export([
+    count/0,
+    count_ignored/0,
+    flush/0,
+    message_stuffer/3,
+    pop/0,
+    print_state/0
+]).
 -endif.
 
 init(Level) ->
@@ -137,22 +152,12 @@ has_line_numbers() ->
     % this gets called a LOT - cache the answer
     case erlang:get({?MODULE, has_line_numbers}) of
         undefined ->
-            R = otp_version() >= 15,
+            R = lager_util:otp_version() >= 15,
             erlang:put({?MODULE, has_line_numbers}, R),
             R;
         Bool ->
             Bool
     end.
-
-otp_version() ->
-    otp_version(erlang:system_info(otp_release)).
-
-otp_version([$R | Rel]) ->
-    {Ver, _} = string:to_integer(Rel),
-    Ver;
-otp_version(Rel) ->
-    {Ver, _} = string:to_integer(Rel),
-    Ver.
 
 not_running_test() ->
     ?assertEqual({error, lager_not_running}, lager:log(info, self(), "not running")).
@@ -205,7 +210,7 @@ lager_test_() ->
             },
             {"unsafe logging with args works",
                 fun() ->
-                        lager:warning("test message ~p", [self()]),
+                        lager:warning_unsafe("test message ~p", [self()]),
                         ?assertEqual(1, count()),
                         {Level, _Time, Message,_Metadata}  = pop(),
                         ?assertMatch(Level, lager_util:level_to_num(warning)),
@@ -245,6 +250,15 @@ lager_test_() ->
                         [ [lager:warning("test message") || _N <- lists:seq(1, 10)] ||
                             _I <- lists:seq(1, 10)],
                         ?assertEqual(100, count()),
+                        ok
+                end
+            },
+            {"logging with only metadata works",
+                fun() ->
+                        ?assertEqual(0, count()),
+                        lager:warning([{just, metadata}]),
+                        lager:warning([{just, metadata}, {foo, bar}]),
+                        ?assertEqual(2, count()),
                         ok
                 end
             },
@@ -465,6 +479,26 @@ lager_test_() ->
                         lager:clear_all_traces(),
                         lager:info([{requestid, 6}], "hello world"),
                         ?assertEqual(10, count()),
+                        lager:clear_all_traces(),
+                        lager:trace(?MODULE, [{requestid, '>=', 5}, {requestid, '=<', 7}], debug),
+                        lager:info([{requestid, 4}], "nope!"),
+                        lager:info([{requestid, 5}], "hello world"),
+                        lager:info([{requestid, 7}], "hello world again"),
+                        ?assertEqual(12, count()),
+                        lager:clear_all_traces(),
+                        lager:trace(?MODULE, [{foo, '!=', bar}]),
+                        lager:info([{foo, bar}], "hello world"),
+                        ?assertEqual(12, count()),
+                        lager:info([{foo, baz}], "blarg"),
+                        ?assertEqual(13, count()),
+                        lager:clear_all_traces(),
+                        lager:trace(?MODULE, [{all, [{foo, '=', bar}, {null, false}]}]),
+                        lager:info([{foo, bar}], "should not be logged"),
+                        ?assertEqual(13, count()),
+                        lager:clear_all_traces(),
+                        lager:trace(?MODULE, [{any, [{foo, '=', bar}, {null, true}]}]),
+                        lager:info([{foo, qux}], "should be logged"),
+                        ?assertEqual(14, count()),
                         ok
                 end
             },
@@ -660,6 +694,26 @@ lager_test_() ->
                         ?assertEqual(ok, lager:md([{platypus, gravid}, {sloth, hirsute}, {duck, erroneous}])),
                         ?assertError(badarg, lager:md({flamboyant, flamingo})),
                         ?assertError(badarg, lager:md("zookeeper zephyr")),
+                        ok
+                end
+            },
+            {"dates should be local by default",
+                fun() ->
+                        lager:warning("so long, and thanks for all the fish"),
+                        ?assertEqual(1, count()),
+                        {_Level, {_Date, Time}, _Message, _Metadata}  = pop(),
+                        ?assertEqual(nomatch, binary:match(iolist_to_binary(Time), <<"UTC">>)),
+                        ok
+                end
+            },
+            {"dates should be UTC if SASL is configured as UTC",
+                fun() ->
+                        application:set_env(sasl, utc_log, true),
+                        lager:warning("so long, and thanks for all the fish"),
+                        application:set_env(sasl, utc_log, false),
+                        ?assertEqual(1, count()),
+                        {_Level, {_Date, Time}, _Message, _Metadata}  = pop(),
+                        ?assertNotEqual(nomatch, binary:match(iolist_to_binary(Time), <<"UTC">>)),
                         ok
                 end
             }
@@ -899,8 +953,101 @@ error_logger_redirect_crash_cleanup(_Sink) ->
     end,
     error_logger:tty(true).
 
+crash_fsm_setup() ->
+    error_logger:tty(false),
+    application:load(lager),
+    application:set_env(lager, error_logger_redirect, true),
+    application:set_env(lager, handlers, [{?MODULE, error}]),
+    lager:start(),
+    crash_fsm:start(),
+    crash_statem:start(),
+    lager:log(error, self(), "flush flush"),
+    timer:sleep(100),
+    gen_event:call(lager_event, ?MODULE, flush),
+    lager_event.
+
+crash_fsm_sink_setup() ->
+    ErrorSink = error_logger_lager_event,
+    error_logger:tty(false),
+    application:load(lager),
+    application:set_env(lager, error_logger_redirect, true),
+    application:set_env(lager, handlers, []),
+    application:set_env(lager, extra_sinks, [{ErrorSink, [{handlers, [{?MODULE, error}]}]}]),
+    lager:start(),
+    crash_fsm:start(),
+    crash_statem:start(),
+    lager:log(ErrorSink, error, self(), "flush flush", []),
+    timer:sleep(100),
+    flush(ErrorSink),
+    ErrorSink.
+
+crash_fsm_cleanup(_Sink) ->
+    application:stop(lager),
+    application:stop(goldrush),
+    application:unset_env(lager, extra_sinks),
+    lists:foreach(fun(N) -> kill_crasher(N) end, [crash_fsm, crash_statem]),
+    error_logger:tty(true).
+
+kill_crasher(RegName) ->
+    case whereis(RegName) of
+        undefined -> ok;
+        Pid -> exit(Pid, kill)
+    end.
+
+spawn_fsm_crash(Module) ->
+    spawn(fun() -> Module:crash() end),
+    timer:sleep(100),
+    _ = gen_event:which_handlers(error_logger),
+    ok.
+
+crash_fsm_test_() ->
+    TestBody = fun(Name, FsmModule, Expected) ->
+                   fun(Sink) ->
+                      {Name,
+                       fun() ->
+                            case {FsmModule =:= crash_statem, lager_util:otp_version() < 19} of
+                                {true, true} -> ok;
+                                _ ->
+                                    Pid = whereis(FsmModule),
+                                    spawn_fsm_crash(FsmModule),
+                                    {Level, _, Msg, Metadata} = pop(Sink),
+                                    test_body(Expected, lists:flatten(Msg)),
+                                    ?assertEqual(Pid, proplists:get_value(pid, Metadata)),
+                                    ?assertEqual(lager_util:level_to_num(error), Level)
+                            end
+                       end
+                      }
+                   end
+               end,
+    Tests = [
+        fun(Sink) ->
+            {"again, there is nothing up my sleeve",
+                fun() ->
+                        ?assertEqual(undefined, pop(Sink)),
+                        ?assertEqual(0, count(Sink))
+                end
+            }
+        end,
+
+        TestBody("gen_fsm crash", crash_fsm, "gen_fsm crash_fsm in state state1 terminated with reason: call to undefined function crash_fsm:state1/3 from gen_fsm:handle_msg/7"),
+        TestBody("gen_statem crash", crash_statem, "gen_statem crash_statem in state state1 terminated with reason: no function clause matching crash_statem:handle")
+    ],
+
+    {"FSM crash output tests", [
+        {"Default sink",
+         {foreach,
+            fun crash_fsm_setup/0,
+            fun crash_fsm_cleanup/1,
+            Tests}},
+        {"Error logger sink",
+         {foreach,
+            fun crash_fsm_sink_setup/0,
+            fun crash_fsm_cleanup/1,
+            Tests}}
+    ]}.
+
 error_logger_redirect_crash_test_() ->
-    TestBody=fun(Name,CrashReason,Expected) -> 
+    TestBody=fun(Name,CrashReason,Expected) ->
         fun(Sink) ->
             {Name,
                 fun() ->
@@ -915,7 +1062,7 @@ error_logger_redirect_crash_test_() ->
         end
     end,
     Tests = [
-        fun(Sink) -> 
+        fun(Sink) ->
             {"again, there is nothing up my sleeve",
                 fun() ->
                         ?assertEqual(undefined, pop(Sink)),
@@ -943,7 +1090,7 @@ error_logger_redirect_crash_test_() ->
         TestBody("badfun",badfun,"gen_server crash terminated with reason: bad function booger in crash:handle_call/3")
     ],
     {"Error logger redirect crash", [
-        {"Redirect to default sink", 
+        {"Redirect to default sink",
             {foreach,
             fun error_logger_redirect_crash_setup/0,
             fun error_logger_redirect_crash_cleanup/1,
@@ -1520,7 +1667,7 @@ error_logger_redirect_test_() ->
         end,
         Tests),
     {"Error logger redirect", [
-        {"Redirect to default sink", 
+        {"Redirect to default sink",
             {foreach,
             fun error_logger_redirect_setup/0,
             fun error_logger_redirect_cleanup/1,
@@ -1543,77 +1690,107 @@ unsafe_format_test() ->
     ok.
 
 async_threshold_test_() ->
-    {foreach,
-        fun() ->
-                error_logger:tty(false),
-                ets:new(async_threshold_test, [set, named_table, public]),
-                ets:insert_new(async_threshold_test, {sync_toggled, 0}),
-                ets:insert_new(async_threshold_test, {async_toggled, 0}),
-                application:load(lager),
-                application:set_env(lager, error_logger_redirect, false),
-                application:set_env(lager, async_threshold, 2),
-                application:set_env(lager, async_threshold_window, 1),
-                application:set_env(lager, handlers, [{?MODULE, info}]),
-                lager:start()
-        end,
-        fun(_) ->
-                application:unset_env(lager, async_threshold),
-                application:stop(lager),
-                application:stop(goldrush),
-                ets:delete(async_threshold_test),
-                error_logger:tty(true)
-        end,
-        [
-            {"async threshold works",
-                fun() ->
-                        %% we start out async
-                        ?assertEqual(true, lager_config:get(async)),
+    Cleanup = fun(Reset) ->
+        _ = error_logger:tty(false),
+        _ = application:stop(lager),
+        _ = application:stop(goldrush),
+        _ = application:unset_env(lager, async_threshold),
+        if
+            Reset ->
+                true = ets:delete(async_threshold_test),
+                error_logger:tty(true);
+            true ->
+                _ = (catch ets:delete(async_threshold_test)),
+                ok
+        end
+    end,
+    Setup = fun() ->
+        % Evidence suggests that previous tests somewhere are leaving some of this stuff
+        % loaded, and cleaning it out forcefully to allows the test to succeed.
+        _ = Cleanup(false),
+        _ = ets:new(async_threshold_test, [set, named_table, public]),
+        ?assertEqual(true, ets:insert_new(async_threshold_test, {sync_toggled, 0})),
+        ?assertEqual(true, ets:insert_new(async_threshold_test, {async_toggled, 0})),
+        _ = application:load(lager),
+        ok = application:set_env(lager, error_logger_redirect, false),
+        ok = application:set_env(lager, async_threshold, 2),
+        ok = application:set_env(lager, async_threshold_window, 1),
+        ok = application:set_env(lager, handlers, [{?MODULE, info}]),
+        ok = lager:start(),
+        true
+    end,
+    {foreach, Setup, Cleanup, [
+        {"async threshold works",
+         {timeout, 30, fun() ->
+            %% we start out async
+            ?assertEqual(true, lager_config:get(async)),
+            ?assertEqual([{sync_toggled, 0}],
+                ets:lookup(async_threshold_test, sync_toggled)),
 
-                        %% put a ton of things in the queue
-                        Workers = [spawn_monitor(fun() -> [lager:info("hello world") || _ <- lists:seq(1, 100)] end)
-                                   || _ <- lists:seq(1, 10)],
+            %% put a ton of things in the queue
+            WorkCnt = erlang:max(10, (erlang:system_info(schedulers) * 2)),
+            OtpVsn  = lager_util:otp_version(),
+            % newer OTPs *may* handle the messages faster, so we'll send more
+            MsgCnt  = ((OtpVsn * OtpVsn) div 2),
+            Workers = spawn_stuffers(WorkCnt, [MsgCnt, info, "hello world"], []),
 
-                        %% serialize on mailbox
-                        _ = gen_event:which_handlers(lager_event),
-                        timer:sleep(500),
+            %% serialize on mailbox
+            _ = gen_event:which_handlers(lager_event),
+            timer:sleep(500),
 
-                        %% By now the flood of messages will have
-                        %% forced the backend throttle to turn off
-                        %% async mode, but it's possible all
-                        %% outstanding requests have been processed,
-                        %% so checking the current status (sync or
-                        %% async) is an exercise in race control.
+            %% By now the flood of messages should have forced the backend throttle
+            %% to turn off async mode, but it's possible all outstanding requests
+            %% have been processed, so checking the current status (sync or async)
+            %% is an exercise in race control.
+            %% Instead, we'll see whether the backend throttle has toggled into sync
+            %% mode at any point in the past.
+            ?assertMatch([{sync_toggled, N}] when N > 0,
+                ets:lookup(async_threshold_test, sync_toggled)),
 
-                        %% Instead, we'll see whether the backend
-                        %% throttle has toggled into sync mode at any
-                        %% point in the past
-                        ?assertMatch([{sync_toggled, N}] when N > 0,
-                                                              ets:lookup(async_threshold_test, sync_toggled)),
-                        %% wait for all the workers to return, meaning that all
-                        %% the messages have been logged (since we're
-                        %% definitely in sync mode at the end of the run)
-                        collect_workers(Workers),
-                        %% serialize on the mailbox again
-                        _ = gen_event:which_handlers(lager_event),
-                        %% just in case...
-                        timer:sleep(1000),
-                        lager:info("hello world"),
-                        _ = gen_event:which_handlers(lager_event),
+            %% Wait for all the workers to return, meaning that all the messages have
+            %% been logged (since we're definitely in sync mode at the end of the run).
+            collect_workers(Workers),
 
-                        %% async is true again now that the mailbox has drained
-                        ?assertEqual(true, lager_config:get(async)),
-                        ok
-                end
-            }
-        ]
-    }.
+            %% serialize on the mailbox again
+            _ = gen_event:which_handlers(lager_event),
+
+            %% just in case...
+            timer:sleep(1000),
+            lager:info("hello world"),
+            _ = gen_event:which_handlers(lager_event),
+
+            %% async is true again now that the mailbox has drained
+            ?assertEqual(true, lager_config:get(async)),
+            ok
+        end}}
+    ]}.
+
+% Fire off the stuffers with minimal resource overhead - speed is of the essence.
+spawn_stuffers(0, _, Refs) ->
+    % Attempt to return them in about the order that they'll finish.
+    lists:reverse(Refs);
+spawn_stuffers(N, Args, Refs) ->
+    {_Pid, Ref} = erlang:spawn_monitor(?MODULE, message_stuffer, Args),
+    spawn_stuffers((N - 1), Args, [Ref | Refs]).
+
+% Spawned process to stuff N copies of Message into lager's message queue as fast as possible.
+% Skip using a list function for speed and low memory footprint - don't want to take the
+% resources to create a sequence (or pass one in).
+message_stuffer(N, Level, Message) ->
+    message_stuffer_(N, Level, [{pid, erlang:self()}], Message).
+
+message_stuffer_(0, _, _, _) ->
+    ok;
+message_stuffer_(N, Level, Meta, Message) ->
+    lager:log(Level, Meta, Message),
+    message_stuffer_((N - 1), Level, Meta, Message).
 
 collect_workers([]) ->
     ok;
-collect_workers(Workers) ->
+collect_workers([Ref | Refs]) ->
     receive
         {'DOWN', Ref, _, _, _} ->
-            collect_workers(lists:keydelete(Ref, 2, Workers))
+            collect_workers(Refs)
     end.
 
 produce_n_error_logger_msgs(N) ->

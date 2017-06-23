@@ -5,7 +5,7 @@ to provide a more traditional way to perform logging in an erlang application
 that plays nicely with traditional UNIX logging tools like logrotate and
 syslog.
 
-  [Travis-CI](http://travis-ci.org/basho/lager) :: ![Travis-CI](https://secure.travis-ci.org/basho/lager.png)
+[Travis-CI](http://travis-ci.org/erlang-lager/lager) :: [![Travis-CI](https://travis-ci.org/erlang-lager/lager.svg?branch=master)](http://travis-ci.org/erlang-lager/lager)
 
 Features
 --------
@@ -27,6 +27,25 @@ Features
 * Map support (requires 17+)
 * Optional load shedding by setting a high water mark to kill (and reinstall)
   a sink after a configurable cool down timer
+
+OTP Support Policy
+------------------
+The lager maintainers intend to support the past three OTP releases from
+current on the main 3.x branch of the project. As of 3.4.0 that includes 19, 18
+and 17. As a special case, until OTP 20 is released, we will continue to accept
+PRs for and support R16.
+
+Lager may or may not run on older OTP releases but it will only be guaranteed
+tested on the previous three OTP releases. If you need a version of lager
+which runs on older OTP releases, we recommend you use either the 3.4.0 release
+or the 2.x branch.
+
+Monthly triage cadence
+----------------------
+We have (at least) monthly issue and PR triage for lager in the #lager room on the 
+[freenode](https://freenode.net) IRC network every third Thursday at 2 pm US/Pacific,
+9 pm UTC. You are welcome to join us there to ask questions about lager or 
+participate in the triage.
 
 Usage
 -----
@@ -204,6 +223,8 @@ call "semi-iolist":
       single letter encoding of the severity level (e.g. `'debug'` -> `$D`)
     * The placeholders `pid`, `file`, `line`, `module`, `function`, and `node`
       will always exist if the parse transform is used.
+    * If the error logger integration is used, the placeholder `pid`
+      will always exist and the placeholder `name` may exist.
     * Applications can define their own metadata placeholder.
     * A tuple of `{atom(), semi-iolist()}` allows for a fallback for
       the atom placeholder. If the value represented by the atom
@@ -221,6 +242,22 @@ Examples:
 [{pid,"Unknown Pid"}] -> "<?.?.?>" if pid is in the metadata, "Unknown Pid" if not.
 [{pid, ["My pid is ", pid], ["Unknown Pid"]}] -> if pid is in the metadata print "My pid is <?.?.?>", otherwise print "Unknown Pid"
 [{server,{pid, ["(", pid, ")"], ["(Unknown Server)"]}}] -> user provided server metadata, otherwise "(<?.?.?>)", otherwise "(Unknown Server)"
+```
+
+Universal time
+--------------
+By default, lager formats timestamps as local time for whatever computer
+generated the log message.
+
+To make lager use UTC timestamps, you can set the `sasl` application's
+`utc_log` configuration parameter to `true` in your application configuration
+file.
+
+Example:
+
+```
+%% format log timestamps as UTC
+[{sasl, [{utc_log, true}]}].
 ```
 
 Error logger integration
@@ -279,7 +316,7 @@ This will use async messaging until the mailbox exceeds 20 messages, at which
 point synchronous messaging will be used, and switch back to asynchronous, when
 size reduces to `20 - 5 = 15`.
 
-If you wish to disable this behaviour, simply set it to `undefined`. It defaults
+If you wish to disable this behaviour, simply set `async_threshold` to `undefined`. It defaults
 to a low number to prevent the mailbox growing rapidly beyond the limit and causing
 problems. In general, lager should process messages as fast as they come in, so getting
 20 behind should be relatively exceptional anyway.
@@ -437,7 +474,7 @@ See the `.app.src` file for further details.
 Syslog Support
 --------------
 Lager syslog output is provided as a separate application:
-[lager_syslog](https://github.com/basho/lager_syslog). It is packaged as a
+[lager_syslog](https://github.com/erlang-lager/lager_syslog). It is packaged as a
 separate application so lager itself doesn't have an indirect dependency on a
 port driver. Please see the `lager_syslog` README for configuration information.
 
@@ -538,7 +575,8 @@ second argument if desired.
 
 You can also specify multiple expressions in a filter, or use the `*` atom as
 a wildcard to match any message that has that attribute, regardless of its
-value.
+value. You may also use the special value `!` to mean, only select if this
+key is **not** present.
 
 Tracing to an existing logfile is also supported (but see **Multiple
 sink support** below):
@@ -566,19 +604,42 @@ data-type that serializes well. To trace by pid, use the pid as a string:
 lager:trace_console([{pid, "<0.410.0>"}])
 ```
 
-As of lager 2.0, you can also use a 3 tuple while tracing, where the second
+### Filter expressions
+As of lager 3.3.1, you can also use a 3 tuple while tracing where the second
 element is a comparison operator. The currently supported comparison operators
 are:
 
 * `<` - less than
+* `=<` - less than or equal
 * `=` - equal to
+* `!=` - not equal to
 * `>` - greater than
+* `>=` - greater than or equal
 
 ```erlang
 lager:trace_console([{request, '>', 117}, {request, '<', 120}])
 ```
 
 Using `=` is equivalent to the 2-tuple form.
+
+### Filter composition
+As of lager 3.3.1 you may also use the special filter composition keys of
+`all` or `any`. For example the filter example above could be
+expressed as:
+
+```erlang
+lager:trace_console([{all, [{request, '>', 117}, {request, '<', 120}]}])
+```
+
+`any` has the effect of "OR style" logical evaluation between filters; `all`
+means "AND style" logical evaluation between filters. These compositional filters
+expect a list of additional filter expressions as their values.
+
+### Null filters
+The `null` filter has a special meaning.  A filter of `{null, false}` acts as
+a black hole; nothing is passed through.  A filter of `{null, true}` means
+*everything* passes through. No other values for the null filter are valid and
+will be rejected.
 
 ### Multiple sink support
 
@@ -652,8 +713,143 @@ You can also pass it to `erlc`, if you prefer:
 erlc -pa lager/ebin +'{parse_transform, lager_transform}' +'{lager_truncation_size, 1024}' file.erl
 ```
 
+Suppress applications and supervisors start/stop logs
+-----------------------------------------------------
+If you don't want to see supervisors and applications start/stop logs in debug
+level of your application, you can use these configs to turn it off:
+
+```erlang
+{lager, [{suppress_application_start_stop, true},
+         {suppress_supervisor_start_stop, true}]}
+```
+
+Elixir Support
+--------------
+
+There are 2 ways in which Lager can be leveraged in an Elixir project:
+
+1. Lager Backend for Elixir Logger
+2. Directly
+
+### Lager Backend for Elixir Logger
+
+[Elixir's Logger](https://hexdocs.pm/logger/Logger.html) is the idiomatic way
+to add logging into elixir code. Logger has a plug-in model,
+allowing for different logging [Backends](https://hexdocs.pm/logger/Logger.html#module-backends)
+to be used without the need to change the logging code within your project.
+
+This approach will benefit from the fact that most elixir libs and frameworks
+are likely to use the elixir Logger and as such logging will all flow via the
+same logging mechanism.
+
+In [elixir 2.0 support for parse transforms will be deprecated](https://github.com/elixir-lang/elixir/issues/5762).
+Taking the "Lager as a Logger Backend" approach is likely bypass any related 
+regression issues that would be introduced into a project which is using lager 
+directly when updating to elixir 2.0.
+
+There are open source elixir Logger backends for Lager available:
+- [LagerLogger](https://github.com/PSPDFKit-labs/lager_logger)
+- [LoggerLagerBackend](https://github.com/jonathanperret/logger_lager_backend)
+
+### Directly
+
+It is fully possible prior to elixir 2.0 to use lager and all its features
+directly.
+
+After elixir 2.0 there will be no support for parse transforms, and it would be
+recommended to use an elixir wrapper for the lager api that provides compile time
+log level exclusion via elixir macros when opting for direct use of lager.
+
+Including Lager as a dependency:
+``` elixir
+# mix.exs
+def application do
+  [
+    applications: [:lager],
+    erl_opts: [parse_transform: "lager_transform"]
+  ]
+end
+
+defp deps do
+  [{:lager, "~> 3.2"}]
+end
+```
+
+Example Configuration:
+``` elixir
+# config.exs
+use Mix.Config
+
+# Stop lager writing a crash log
+config :lager, :crash_log, false
+
+config :lager,
+  log_root: '/var/log/hello',
+  handlers: [
+    lager_console_backend: :info,
+    lager_file_backend: [file: "error.log", level: :error],
+    lager_file_backend: [file: "console.log", level: :info]
+  ]
+```
+
+There is a known issue where Elixir's Logger and Lager both contest for the
+Erlang `error_logger` handle if used side by side.
+
+If using both add the following to your `config.exs`:
+```elixir
+# config.exs
+use Mix.Config
+
+# Stop lager redirecting :error_logger messages
+config :lager, :error_logger_redirect, false
+
+# Stop lager removing Logger's :error_logger handler
+config :lager, :error_logger_whitelist, [Logger.ErrorHandler]
+```
+
+Example Usage:
+``` elixir
+:lager.error('Some message')
+:lager.warning('Some message with a term: ~p', [term])
+```
+
 3.x Changelog
 -------------
+3.4.1 - 28 March 2017
+
+    * Docs: Added documentation around using lager in the context of elixir applications (#398)
+    * Bugfix: Properly expand paths when log_root is set. (#386)
+    * Policy: Removed R15 from Travis configuration
+
+3.4.0 - 16 March 2017
+
+    * Policy: Adopt official OTP support policy. (This is the **last** lager 3.x release
+      that will support R15.)
+    * Test: Fix timeouts, R15 missing functions on possibly long-running tests in Travis. (#394, #395)
+    * Feature: capture and log metadata from error_logger messages (#397)
+    * Feature: Expose new trace filters and enable filter composition (#389)
+    * Feature: Log crashes from gen_fsm and gen_statem correctly (#391)
+    * Docs: Typo in badge URL (#390)
+
+3.3.0 - 16 February 2017
+
+    * Docs: Fix documentation to make 'it' unambiguous when discussing asychronous
+      operation. (#387)
+    * Test: Fix test flappiness due to insufficient sanitation between test runs (#384, #385)
+    * Feature: Allow metadata only logging. (#380)
+    * Feature: Add an upper case severity formatter (#372)
+    * Feature: Add support for suppressing start/stop messages from supervisors (#368)
+    * Bugfix: Fix ranch crash messages (#366)
+    * Test: Update Travis config for 18.3 and 19.0 (#365)
+
+3.2.4 - 11 October 2016
+
+    * Test: Fix dialyzer warnings.
+
+3.2.3 - 29 September 2016
+
+    * Dependency: Update to goldrush 0.19
+
 3.2.2 - 22 September 2016
 
     * Bugfix: Backwards-compatibility fix for `{crash_log, undefined}` (#371)
