@@ -238,7 +238,7 @@ rotate_logfile_count(File, Count) ->
     rotate_logfile_count(File, Count - 1).
 
 rotate_logfile_date(File,DateSpec) ->
-  Timestamp = cal:now_to_local_time(os:timestamp()),
+  Timestamp = calendar:now_to_local_time(os:timestamp()),
   DateTimeStr = filename_postfix(DateSpec,Timestamp),
   NewFilename = iolist_to_binary([filename:rootname(File),DateTimeStr,filename:extension(File)]),
   _ = file:rename(File,NewFilename),
